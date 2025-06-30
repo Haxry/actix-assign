@@ -239,7 +239,7 @@ async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
         &mint,
         &dest,
         &authority,
-        &[], // No multisig
+        &[], 
         req.amount,
     ) {
         Ok(i) => i,
@@ -275,6 +275,18 @@ async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
     })
 }
 
+// fn base58_to_base64(base58_str: &str) -> Result<String, Box<dyn std::error::Error>> {
+//     let raw_bytes = bs58::decode(base58_str).into_vec()?;
+//     let base64_str = general_purpose::STANDARD.encode(&raw_bytes);
+//     Ok(base64_str)
+// }
+
+// fn base64_to_base58(base64_str: &str) -> Result<String, Box<dyn std::error::Error>> {
+//     let raw_bytes = general_purpose::STANDARD.decode(base64_str)?;
+//     let base58_str = bs58::encode(&raw_bytes).into_string();
+//     Ok(base58_str)
+// }
+
 #[post("/message/sign")]
 async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
     if req.message.is_empty() || req.secret.is_empty() {
@@ -294,12 +306,22 @@ async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
         }
     };
 
+    // let base64_secret = match base58_to_base64(&req.secret) {
+    //     Ok(b64) => b64,
+    //     Err(_) => {
+    //         return HttpResponse::BadRequest().json(serde_json::json!({
+    //             "success": false,
+    //             "error": "Failed to convert secret key to base64"
+    //         }));
+    //     }
+    // };
+
     let keypair = match Keypair::from_bytes(&secret_bytes) {
         Ok(kp) => kp,
         Err(_) => {
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "success": false,
-                "error": "Failed to parse secret key"
+                "error": "Missing required fields"
             }));
         }
     };
@@ -419,13 +441,12 @@ async fn send_token(req: web::Json<SendTokenRequest>) -> impl Responder {
         })),
     };
 
-    // Token accounts must be known beforehand (not derived here for simplicity)
     let instr = match spl_transfer(
         &spl_token::id(),
-        &owner,         // Source token account
-        &destination,   // Destination token account
-        &owner,         // Owner of the source
-        &[],            // No multisig
+        &owner,         
+        &destination,  
+        &owner,         
+        &[],            
         req.amount,
     ) {
         Ok(instr) => instr,
