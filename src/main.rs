@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::{Keypair, Signer},
+    signature::{Keypair, Signer,Signature},
     system_program,
+    system_instruction
 };
-use spl_token::instruction::{initialize_mint,mint_to};
+use spl_token::instruction::{initialize_mint,mint_to,transfer as spl_transfer};
 use base64::{engine::general_purpose, Engine as _};
-use base58::ToBase58;
+use base58::{ToBase58, FromBase58};
 use std::str::FromStr;
 
 #[derive(Serialize)]
@@ -68,12 +69,63 @@ struct InstructionResponse {
 }
 
 
+#[derive(Deserialize)]
+struct SignMessageRequest {
+    message: String,
+    secret: String,
+}
+
+#[derive(Serialize)]
+struct SignMessageResponse {
+    signature: String,
+    public_key: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct VerifyMessageRequest {
+    message: String,
+    signature: String,
+    pubkey: String,
+}
+
+#[derive(Serialize)]
+struct VerifyMessageResponse {
+    valid: bool,
+    message: String,
+    pubkey: String,
+}
+
+#[derive(Deserialize)]
+struct SendSolRequest {
+    from: String,
+    to: String,
+    lamports: u64,
+}
+
+#[derive(Deserialize)]
+struct SendTokenRequest {
+    destination: String,
+    mint: String,
+    owner: String,
+    amount: u64,
+}
+
+#[derive(Serialize)]
+struct TokenAccountMeta {
+    pubkey: String,
+    is_signer: bool,
+}
+
+
 #[post("/keypair")]
 async fn generate_keypair() -> impl Responder {
     match Keypair::new() {
         keypair => {
             let pubkey = keypair.pubkey().to_string();
             let secret = keypair.to_bytes().to_vec().to_base58();
+            let bytes= keypair.to_bytes();
+            print!("Generated Keypair: pubkey: {}, secret: {:?}", pubkey, bytes);
 
             HttpResponse::Ok().json(SuccessResponse {
                 success: true,
@@ -223,6 +275,185 @@ async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
     })
 }
 
+#[post("/message/sign")]
+async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
+    if req.message.is_empty() || req.secret.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Missing required fields"
+        }));
+    }
+
+    let secret_bytes = match req.secret.from_base58() {
+        Ok(b) => b,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "Invalid base58 secret key"
+            }));
+        }
+    };
+
+    let keypair = match Keypair::from_bytes(&secret_bytes) {
+        Ok(kp) => kp,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "Failed to parse secret key"
+            }));
+        }
+    };
+
+    let signature = keypair.sign_message(req.message.as_bytes());
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "data": {
+            "signature": general_purpose::STANDARD.encode(signature.as_ref()),
+            "public_key": keypair.pubkey().to_string(),
+            "message": req.message
+        }
+    }))
+}
+
+#[post("/message/verify")]
+async fn verify_message(req: web::Json<VerifyMessageRequest>) -> impl Responder {
+    let pubkey = match Pubkey::from_str(&req.pubkey) {
+        Ok(p) => p,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "Invalid public key"
+            }));
+        }
+    };
+
+    let signature_bytes = match general_purpose::STANDARD.decode(&req.signature) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "Invalid base64 signature"
+            }));
+        }
+    };
+
+    let signature = match Signature::try_from(signature_bytes.as_slice()) {
+        Ok(sig) => sig,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "Invalid signature format"
+            }));
+        }
+    };
+
+    let valid = signature.verify(pubkey.as_ref(), req.message.as_bytes());
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "data": {
+            "valid": valid,
+            "message": req.message,
+            "pubkey": pubkey.to_string()
+        }
+    }))
+}
+
+#[post("/send/sol")]
+async fn send_sol(req: web::Json<SendSolRequest>) -> impl Responder {
+    let from = match Pubkey::from_str(&req.from) {
+        Ok(pk) => pk,
+        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid sender address"
+        })),
+    };
+
+    let to = match Pubkey::from_str(&req.to) {
+        Ok(pk) => pk,
+        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid recipient address"
+        })),
+    };
+
+    let instr = system_instruction::transfer(&from, &to, req.lamports);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "data": {
+            "program_id": instr.program_id.to_string(),
+            "accounts": [
+                instr.accounts[0].pubkey.to_string(),
+                instr.accounts[1].pubkey.to_string()
+            ],
+            "instruction_data": general_purpose::STANDARD.encode(instr.data)
+        }
+    }))
+}
+
+#[post("/send/token")]
+async fn send_token(req: web::Json<SendTokenRequest>) -> impl Responder {
+    let destination = match Pubkey::from_str(&req.destination) {
+        Ok(pk) => pk,
+        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid destination address"
+        })),
+    };
+
+    let mint = match Pubkey::from_str(&req.mint) {
+        Ok(pk) => pk,
+        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid mint address"
+        })),
+    };
+
+    let owner = match Pubkey::from_str(&req.owner) {
+        Ok(pk) => pk,
+        Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Invalid owner address"
+        })),
+    };
+
+    // Token accounts must be known beforehand (not derived here for simplicity)
+    let instr = match spl_transfer(
+        &spl_token::id(),
+        &owner,         // Source token account
+        &destination,   // Destination token account
+        &owner,         // Owner of the source
+        &[],            // No multisig
+        req.amount,
+    ) {
+        Ok(instr) => instr,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to build transfer: {}", e)
+        })),
+    };
+
+    let accounts = instr
+        .accounts
+        .iter()
+        .map(|meta| TokenAccountMeta {
+            pubkey: meta.pubkey.to_string(),
+            is_signer: meta.is_signer,
+        })
+        .collect::<Vec<_>>();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "data": {
+            "program_id": instr.program_id.to_string(),
+            "accounts": accounts,
+            "instruction_data": general_purpose::STANDARD.encode(instr.data)
+        }
+    }))
+}
+
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -233,8 +464,12 @@ async fn main() -> std::io::Result<()> {
             .service(generate_keypair)
             .service(create_token)
             .service(mint_token)
+            .service(sign_message)
+            .service(verify_message)
+            .service(send_sol)
+            .service(send_token)
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("0.0.0.0", 8080))?
     .run()
     .await
 }
